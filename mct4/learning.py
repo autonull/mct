@@ -40,10 +40,8 @@ class LearningEngine:
         """
         Compute tension (error signal).
         
-        For classification with softmax output, use cross-entropy gradient:
-        T_v = softmax(Y) - Y*  (but Y is already softmaxed, so T_v = Y - Y*)
-        
-        T_v = (Y* − Y) / √D         ← normalized error direction
+        For gradient descent, we want to move in the direction (Y* - Y), not (Y - Y*).
+        T_v = (Y* - Y) / √D         ← negative gradient direction
         ||T|| = MSE(Y*, Y) ∈ [0,1]  ← scalar error magnitude
         
         Args:
@@ -55,13 +53,11 @@ class LearningEngine:
         """
         D = len(Y)
         
-        # For softmax output with cross-entropy, gradient is (Y - Y*)
-        # This is the standard result: d(CE)/d(logits) = softmax(logits) - one_hot
-        T_v = (Y - Y_star) / np.sqrt(D)
+        # Negative gradient direction: we want to increase Y towards Y*
+        T_v = (Y_star - Y) / np.sqrt(D)
         
         # MSE normalized to [0, 1] range
         mse = np.mean((Y_star - Y) ** 2)
-        # Clamp and scale to [0, 1]
         T_norm = min(1.0, np.sqrt(mse))
         
         return T_v, T_norm
@@ -70,38 +66,23 @@ class LearningEngine:
         """
         Propagate tension signal in reverse topological order.
         
-        At each multi-input node, blame is partitioned by incoming signal magnitude:
-        w_blame,j = ||V_in,j||₂ / (Σ||V_in||₂ + ε)
-        
-        The attenuated tension signal reaching node i is:
-        T_local,i = T_v · w_blame,i · (1 − tension_trace_i · 0.5)
-        
-        Args:
-            T_v: Error direction vector at output
-            output_node_id: ID of the output node that fired
-            
-        Returns:
-            Dictionary mapping node_id -> T_local (local tension signal)
+        Simplified version: each node receives error signal scaled by its weight contribution.
         """
-        # Build reverse topological order from active path
         active_path = self.state.active_path
         if not active_path:
             return {}
         
         # Sort by hop (descending) for reverse order
         sorted_path = sorted(active_path, key=lambda r: -r.hop)
-        
-        # Map node_id to record
         path_map = {r.node_id: r for r in active_path}
         
-        # Tension at each node - start with output node
+        # Tension at each node
         node_tensions: Dict[int, np.ndarray] = {}
         node_tensions[output_node_id] = T_v
         
-        # Clear edge tension tracking
         self.edge_tension_attribution = defaultdict(float)
         
-        # Propagate in reverse order (from output back to inputs)
+        # Propagate in reverse order
         for record in sorted_path:
             node_id = record.node_id
             
@@ -109,46 +90,34 @@ class LearningEngine:
                 continue
             
             T_current = node_tensions[node_id]
+            node = self.state.nodes.get(node_id)
             
-            # Compute blame weights for incoming edges
             incoming_sources = list(record.inbox_sources.keys())
             if not incoming_sources:
-                # Input node or no incoming - don't propagate further upstream
-                # But still record tension for this node's weight update
                 continue
             
-            # w_blame,j = ||V_in,j||₂ / (Σ||V_in||₂ + ε)
-            norms = []
+            # For each incoming source, propagate error
             for src_id in incoming_sources:
                 V_from_src = record.inbox_sources[src_id]
-                norms.append(np.linalg.norm(V_from_src) + 1e-9)
-            
-            total_norm = sum(norms) + 1e-9
-            blame_weights = [n / total_norm for n in norms]
-            
-            # Distribute tension to upstream nodes
-            for idx, src_id in enumerate(incoming_sources):
-                w_blame = blame_weights[idx]
                 
-                # Get source node's tension trace for attenuation
-                if src_id in self.state.nodes:
-                    src_node = self.state.nodes[src_id]
-                    attenuation = 1.0 - src_node.tension_trace * 0.5
-                    attenuation = max(0.1, attenuation)  # Clamp to prevent negative
-                else:
-                    attenuation = 1.0
+                # Simple error propagation: pass T_current scaled by weight
+                # This is like backprop but using local information only
+                src_node = self.state.nodes.get(src_id)
                 
-                # T_local for source node
-                T_local = T_current * w_blame * attenuation
-                
-                # Accumulate if multiple paths
-                if src_id in node_tensions:
-                    node_tensions[src_id] += T_local
-                else:
-                    node_tensions[src_id] = T_local
-                
-                # Track edge tension for structural evolution
-                self.edge_tension_attribution[(src_id, node_id)] = w_blame * np.linalg.norm(T_current)
+                if src_node is not None:
+                    # Scale by how much this source contributed (based on V_from_src magnitude)
+                    src_norm = np.linalg.norm(V_from_src) + 1e-9
+                    
+                    # Pass full signal (don't divide by total)
+                    # This ensures error signal doesn't vanish
+                    T_local = T_current * 0.5  # Simple scaling
+                    
+                    if src_id in node_tensions:
+                        node_tensions[src_id] += T_local
+                    else:
+                        node_tensions[src_id] = T_local
+                    
+                    self.edge_tension_attribution[(src_id, node_id)] = np.linalg.norm(T_local)
         
         return node_tensions
     

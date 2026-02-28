@@ -83,16 +83,18 @@ class Node:
                 # Random signature on unit sphere for geometric routing
                 self.S = np.random.randn(self.D)
                 self.S /= np.linalg.norm(self.S) + 1e-9
-            
+
             if self.W.shape == (0, 0):
-                # Initialize W to identity × ε
-                epsilon = 0.01
+                # Initialize with strong identity component for reliable signal propagation
                 if self.W_factored and self.rank < self.D:
                     # Low-rank initialization
-                    self.A = np.random.randn(self.D, self.rank) * 0.01
-                    self.B = np.random.randn(self.D, self.rank) * 0.01
+                    scale = np.sqrt(2.0 / (self.D + self.rank))
+                    self.A = np.random.randn(self.D, self.rank) * scale
+                    self.B = np.random.randn(self.D, self.rank) * scale
                 else:
-                    self.W = np.eye(self.D) * epsilon
+                    # Full rank: identity-dominant initialization
+                    self.W = np.eye(self.D) * 0.5
+                    self.W += np.random.randn(self.D, self.D) * 0.1
     
     def get_weight_matrix(self) -> np.ndarray:
         """Get the effective weight matrix (full or reconstructed from factors)."""
